@@ -1,7 +1,7 @@
 # bot.py
 import asyncio 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, InputMediaPhoto
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, InputMediaPhoto, InputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -10,8 +10,9 @@ from datetime import datetime
 from glob import glob
 import pandas as pd
 from newutils import MatchPredictor
+import requests
+from llmanalys import csv_to_string, api_request
 
-# Function to map team choices to sport names
 def get_sport_name(team_choice):
     if team_choice == "Сборная по Хоккею":
         return "hockey"
@@ -24,7 +25,7 @@ def get_sport_name(team_choice):
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-API_TOKEN = "7592943669:AAEtdkKW1wQcXK2vwrRbO5SpahciPHBJlnQ"  # Замените на токен вашего бота
+API_TOKEN = "7592943669:AAEtdkKW1wQcXK2vwrRbO5SpahciPHBJlnQ" 
 
 # Инициализация бота и диспетчера
 bot = Bot(token=API_TOKEN)
@@ -38,7 +39,6 @@ for i in ['hockey', 'football']:
 # Словарь для хранения выборов пользователей
 user_choices = {}
 
-# Определение состояний для FSM
 class Form(StatesGroup):
     waiting_for_match_result = State()
     waiting_for_match_prediction = State()
@@ -62,7 +62,7 @@ def secondary_menu():
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Просмотреть последние 5 матчей")],
-            [KeyboardButton(text="Анализ игр команды")],
+            [KeyboardButton(text="Анализ по графикам")],
             [KeyboardButton(text="Добавить матч")],
             [KeyboardButton(text="Прогноз результата матча")],
         ],
@@ -71,10 +71,6 @@ def secondary_menu():
     return keyboard
 
 async def get_user_team(message: Message):
-    """
-    Вспомогательная функция для получения выбранной сборной пользователя.
-    Если сборная не выбрана, отправляет сообщение с просьбой выбрать сборную и возвращает None.
-    """
     user_id = message.from_user.id
     team = user_choices.get(user_id)
     if not team:
@@ -83,10 +79,9 @@ async def get_user_team(message: Message):
 
 @dp.message(Command(commands=["start"]))
 async def start_command(message: Message):
-    # Очищаем предыдущие выборы (опционально)
     user_choices.pop(message.from_user.id, None)
     await message.answer(
-        "Выберите сборную:",
+        "Добрый день! Я - бот аналитики для 'Медведей Политеха'.\nВыберите сборную:",
         reply_markup=main_menu()
     )
 
@@ -95,7 +90,19 @@ async def choose_team(message: Message):
     user_id = message.from_user.id
     choice = message.text
     user_choices[user_id] = choice
-    await message.answer(f"Отлично! Что хотите узнать?", reply_markup=secondary_menu())
+    photo_mapping = {
+        "Сборная по Хоккею": "hockey.jpg",
+        "Сборная по Футболу": "futbol.jpg"
+    }
+
+    # Get the corresponding photo filename
+    photo_filename = photo_mapping.get(choice)
+    photo = FSInputFile(photo_filename)
+    await message.answer_photo(
+        photo=photo,
+        caption="Отлично! Что хотите узнать?",
+        reply_markup=secondary_menu()
+    )
 
 @dp.message(lambda message: message.text == "Просмотреть последние 5 матчей")
 async def view_last_matches(message: Message):
@@ -109,10 +116,13 @@ async def view_last_matches(message: Message):
     ans = f"Последние матчи сборной по Хоккею:\n"
     for ind, i in enumerate(range(len(df))):
         row = df.iloc[i]
-        ans += f"{ind}) {row['date']} {row['time']} {row['score1']}:{row['score2']}\n"
+        try:
+            ans += f"{ind}) {row['date'].split(' ')[0]} {row['time']} {row['team2']} {row['score1']}:{row['score2']}\n"
+        except:
+            ans += f"{ind}) {str(row['date']).split(' ')[0]} {row['time']} {row['team2']} {row['score1']}:{row['score2']}\n"
     await message.answer(ans)
 
-@dp.message(lambda message: message.text == "Анализ игр команды")
+@dp.message(lambda message: message.text == "Анализ по графикам")
 async def analyze_team_games(message: Message):
     team = await get_user_team(message)
     print(team)
@@ -139,7 +149,7 @@ async def add_match(message: Message, state: FSMContext):
     team = await get_user_team(message)
     if not team:
         return
-    await message.answer(f"{team}\nВведите результаты матча в формате:\nДата Время Команда Счет (например, 27.09.2024 17:00 Зенит 4:0):")
+    await message.answer(f"Введите результаты матча в формате:\nДата Время Команда Счет (например, 27.09.2024 17:00 Зенит 4:0):")
     await state.set_state(Form.waiting_for_match_result)
 
 @dp.message(lambda message: message.text == "Прогноз результата матча")
@@ -147,7 +157,7 @@ async def predict_match_handler(message: Message, state: FSMContext):
     team = await get_user_team(message)
     if not team:
         return
-    await message.answer(f"{team}\nВведите дату, время и команду-противника предстоящего матча в формате:\nДата Время Команда (например, 27.09.2024 17:00 Зенит):")
+    await message.answer(f"Введите дату, время и команду-противника предстоящего матча в формате:\nДата Время Команда (например, 27.09.2024 17:00 Зенит):")
     await state.set_state(Form.waiting_for_match_prediction)
 
 @dp.message(Form.waiting_for_match_result)
@@ -163,7 +173,7 @@ async def handle_match_result(message: Message, state: FSMContext):
 
     parts = match_result.split(' ')
     if len(parts) != 4:
-        await message.answer("Неверный формат сообщения.\n Пожалуйста, введите данные в формате:\nДата Время Команда Счет (например, 27.09.2024 17:00 Зенит 4:0)")
+        await message.answer("Неверный формат сообщения.\n Пожалуйста, введите данные в формате:\nДата Время Команда Счет\nНапример: 27.09.2024 17:00 Зенит 4:0")
         return
 
     date_str, time_str, opponent_team, score = parts
@@ -208,7 +218,7 @@ async def handle_match_prediction(message: Message, state: FSMContext):
 
     parts = prediction.split(' ')
     if len(parts) != 3:
-        await message.answer("Неверный формат сообщения.\n Пожалуйста, введите данные в формате:\nДата Время Команда (например, 27.09.2024 17:00 Зенит)")
+        await message.answer("Неверный формат сообщения.\n Пожалуйста, введите данные в формате:\nДата Время Команда\nНапример: 27.09.2024 17:00 Зенит")
         return
 
     date_str, time_str, opponent_team = parts
@@ -223,8 +233,8 @@ async def handle_match_prediction(message: Message, state: FSMContext):
     # Сохраняем данные
     nuzhno = f"{match_datetime.strftime('%d.%m.%Y %H:%M')} {opponent_team}\n"
     sport_name = get_sport_name(team)
-    helper.predict_match(sport_name, nuzhno)
-
+    preds = helper.predict_match(sport_name, nuzhno)
+    await  message.answer(text=f"Матч будет выигран с отрывом в {round(preds['score_diff_pred'], 2)} очка\nКоманда победит с вероятностью {round(preds['win_probability'], 2)}")
     await state.clear()
 
 @dp.message()
@@ -246,7 +256,7 @@ async def main():
     dp.message.register(start_command, Command(commands=["start"]))
     dp.message.register(choose_team, lambda message: message.text in ["Сборная по Хоккею", "Сборная по Футболу"])
     dp.message.register(view_last_matches, lambda message: message.text == "Просмотреть последние 5 матчей")
-    dp.message.register(analyze_team_games, lambda message: message.text == "Анализ игр команды")
+    dp.message.register(analyze_team_games, lambda message: message.text == "Анализ по графикам")
     dp.message.register(add_match, lambda message: message.text == "Добавить матч")
     dp.message.register(predict_match_handler, lambda message: message.text == "Прогноз результата матча")
     dp.message.register(handle_match_result, Form.waiting_for_match_result)
